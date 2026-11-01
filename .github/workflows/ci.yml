@@ -1,0 +1,60 @@
+# LEV-942: always-on required check for this GitHub Pages site.
+# Runs on every pull request and every push to main, with no paths filter, so the check
+# always reports and can be made required (LEV-773). Third-party code is pinned: actions
+# by commit SHA, html-validate by exact npm version, gitleaks by version and sha256.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci-required:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_CNAME: executiveunlock.ai
+      HTML_VALIDATE_VERSION: 11.17.0
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: CNAME guard
+        run: |
+          test -f CNAME || { echo "::error file=CNAME::CNAME is missing"; exit 1; }
+          actual="$(cat CNAME; printf x)"; actual="${actual%x}"
+          if [ "$actual" != "$EXPECTED_CNAME" ] && [ "$actual" != "$EXPECTED_CNAME"$'\n' ]; then
+            echo "::error file=CNAME::CNAME must read exactly $EXPECTED_CNAME (one trailing newline allowed)"
+            printf 'got: '; od -c CNAME | head -5
+            exit 1
+          fi
+          echo "CNAME ok: $EXPECTED_CNAME"
+
+      - name: HTML validation (offline, every .html file)
+        run: |
+          mapfile -t files < <(git ls-files '*.html')
+          if [ "${#files[@]}" -eq 0 ]; then echo "::error::no .html files found"; exit 1; fi
+          printf 'validating %s\n' "${files[@]}"
+          npm install --no-save --no-audit --no-fund "html-validate@${HTML_VALIDATE_VERSION}"
+          npx --no-install html-validate --config .htmlvalidate.json "${files[@]}"
+
+      - name: Secret scan (gitleaks, full history)
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --verbose .
